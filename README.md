@@ -33,13 +33,13 @@ mode = "jev"
 [jev]
 api_url = "http://127.0.0.1:8090"
 model = ""
-timeout_seconds = 8.0
+timeout_seconds = 5.0
 
 [llm]
 base_url = "https://maas-api.cn-huabei-1.xf-yun.com/v2"
 api_key = ""
 model = "spark-x2.6"
-timeout_seconds = 15.0
+timeout_seconds = 5.0
 
 [decision]
 reply_threshold = 0.3
@@ -69,7 +69,7 @@ LLM 模式的 `api_key` 只保存在本地 `config.toml`，不要提交到版本
 - 决策服务不可用、超时或返回异常时，保留正常回复并记录日志。
 - 未完成事项只触发一次主动任务，不搜索、不代写回复。
 - 重复低效达到重试上限后放行当前版本，避免无限重试。
-- LLM 探针会依次尝试 prefill/非 prefill、带/不带思考关闭参数；任何组合能返回 A/B 标签即视为可用。
+- LLM 探针会尝试 prefill / 非 prefill 与思考关闭参数的兼容组合；任何组合能返回 A/B 标签即视为可用。
 
 ## License
 

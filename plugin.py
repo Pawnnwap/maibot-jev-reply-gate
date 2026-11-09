@@ -71,7 +71,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用 JEV 接话判断")
-    config_version: str = Field(default="1.3.0", description="配置版本")
+    config_version: str = Field(default="1.3.1", description="配置版本")
 
 
 class ServiceConfig(PluginConfigBase):
@@ -100,7 +100,7 @@ class JevConfig(PluginConfigBase):
     )
     model: str = Field(default="", description="请求中携带的模型名；留空使用服务默认值")
     timeout_seconds: float = Field(
-        default=8.0,
+        default=5.0,
         ge=1.0,
         le=15.0,
         description="单次决策请求超时秒数；超时后保留正常回复",
@@ -124,10 +124,10 @@ class LlmConfig(PluginConfigBase):
     )
     model: str = Field(default="spark-x2.6", description="LLM 模型名，例如 spark-x2.6")
     timeout_seconds: float = Field(
-        default=15.0,
+        default=5.0,
         ge=1.0,
         le=60.0,
-        description="单次 LLM 请求超时秒数",
+        description="单次 LLM 请求超时秒数；保持在 replyer Hook 预算内",
     )
 
 
@@ -491,7 +491,7 @@ class JevReplyGatePlugin(MaiBotPlugin):
         description="用 JEV 决策服务判断是否继续回复最新私聊消息",
         mode=HookMode.BLOCKING,
         order=HookOrder.EARLY,
-        timeout_ms=20000,
+        timeout_ms=6000,
         error_policy=ErrorPolicy.SKIP,
     )
     async def gate_reply(
@@ -561,7 +561,7 @@ class JevReplyGatePlugin(MaiBotPlugin):
         description="用 JEV 判断回复是否重复低效，必要时请求 replyer 重生成",
         mode=HookMode.BLOCKING,
         order=HookOrder.LATE,
-        timeout_ms=20000,
+        timeout_ms=6000,
         error_policy=ErrorPolicy.SKIP,
     )
     async def filter_repetitive_reply(self, **kwargs: Any) -> Dict[str, Any]:
@@ -815,27 +815,26 @@ class JevReplyGatePlugin(MaiBotPlugin):
             "instructions": "Choose one option.",
             "criteria": {"true": "yes", "false": "no"},
         }
-        probe_timeout = min(llm.timeout_seconds, 5.0)
+        probe_timeout = min(llm.timeout_seconds, 2.5)
         last_error = "未知错误"
-        for prefill_mode in (True, False):
-            for thinking_flags in (True, False):
-                try:
-                    body = _build_llm_body(
-                        llm,
-                        [{"role": "user", "content": "Capability probe."}],
-                        question,
-                        prefill_mode,
-                        thinking_flags,
-                    )
-                    data = _post_json(url, body, probe_timeout, headers)
-                    choice = (data.get("choices") or [{}])[0]
-                    rows = _extract_llm_rows(choice)
-                    label_logprobs = _rows_to_label_logprobs(rows, ["A", "B"])
-                    if label_logprobs:
-                        return prefill_mode, thinking_flags
-                    last_error = "logprobs 中没有 A/B 标签"
-                except Exception as exc:
-                    last_error = str(exc)
+        for prefill_mode, thinking_flags in ((True, True), (True, False), (False, True)):
+            try:
+                body = _build_llm_body(
+                    llm,
+                    [{"role": "user", "content": "Capability probe."}],
+                    question,
+                    prefill_mode,
+                    thinking_flags,
+                )
+                data = _post_json(url, body, probe_timeout, headers)
+                choice = (data.get("choices") or [{}])[0]
+                rows = _extract_llm_rows(choice)
+                label_logprobs = _rows_to_label_logprobs(rows, ["A", "B"])
+                if label_logprobs:
+                    return prefill_mode, thinking_flags
+                last_error = "logprobs 中没有 A/B 标签"
+            except Exception as exc:
+                last_error = str(exc)
         raise RuntimeError(f"LLM API 不支持 logprobs 或返回格式不兼容: {last_error}")
 
     async def _request_jev(
