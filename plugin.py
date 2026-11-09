@@ -78,7 +78,7 @@ class JevConfig(PluginConfigBase):
 
     api_url: str = Field(
         default="http://127.0.0.1:8090",
-        description="JEV /v1/systemone 服务地址；默认 8090（8091 是 llama-server，不是决策接口）",
+        description="兼容 /v1/systemone 的决策服务地址；默认 http://127.0.0.1:8090",
     )
     model: str = Field(default="", description="请求中携带的模型名；留空使用服务默认值")
     timeout_seconds: float = Field(
