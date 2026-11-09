@@ -1,6 +1,10 @@
 [plugin]
 enabled = true
-config_version = "1.2.0"
+config_version = "1.3.0"
+
+[service]
+# jev = 直接调用 /v1/systemone；llm = 用兼容 LLM 的 logprobs 模拟 systemone。
+mode = "jev"
 
 [jev]
 # 兼容 /v1/systemone 的决策服务地址。
@@ -9,6 +13,16 @@ api_url = "http://127.0.0.1:8090"
 model = ""
 # 单次决策请求超时秒数。
 timeout_seconds = 8.0
+
+[llm]
+# OpenAI 兼容 Chat Completions 服务地址，例如 Spark X2.6 的 /v2。
+base_url = "https://maas-api.cn-huabei-1.xf-yun.com/v2"
+# LLM API Key，按 Bearer 发送；只保存在本地配置，不要提交到仓库。
+api_key = ""
+# LLM 模型名，例如 spark-x2.6。
+model = "spark-x2.6"
+# 单次 LLM 请求超时秒数。
+timeout_seconds = 15.0
 
 [decision]
 # 回复概率达到该值才继续接话；越高越安静。

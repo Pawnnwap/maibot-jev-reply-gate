@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Any, Deque, Dict, List, cast
+from typing import Any, Deque, Dict, List, Literal, Optional, Tuple, cast
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import asyncio
 import json
+import math
+import re
 import time
 
 from maibot_sdk import Field, HookHandler, MaiBotPlugin, PluginConfigBase
@@ -17,6 +19,9 @@ from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
 PLUGIN_ID = "github.pawnnwap.jev-reply-gate"
 HISTORY_LIMIT = 20
 MAX_DRAFT_CHARS = 1200
+ANSWER_PREFIX = "答案："
+LLM_TOP_LOGPROBS = 5
+LABEL_TOKEN_PATTERN = re.compile(r"^\s*([A-Z]{1,2})[\.\):：,、]?\s*$")
 SYSTEM_PROMPT = """你叫麦麦，正在和对方私聊。判断麦麦现在还要不要继续回复最新一条用户消息。
 只依据聊天记录和下面的拟回复判断。
 
@@ -66,7 +71,20 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用 JEV 接话判断")
-    config_version: str = Field(default="1.2.0", description="配置版本")
+    config_version: str = Field(default="1.3.0", description="配置版本")
+
+
+class ServiceConfig(PluginConfigBase):
+    """决策服务选择。"""
+
+    __ui_label__ = "服务选择"
+    __ui_icon__ = "shuffle"
+    __ui_order__ = 1
+
+    mode: Literal["jev", "llm"] = Field(
+        default="jev",
+        description="jev = 直接调用 /v1/systemone；llm = 用兼容 LLM 的 logprobs 模拟 systemone",
+    )
 
 
 class JevConfig(PluginConfigBase):
@@ -74,7 +92,7 @@ class JevConfig(PluginConfigBase):
 
     __ui_label__ = "JEV 服务"
     __ui_icon__ = "server"
-    __ui_order__ = 1
+    __ui_order__ = 2
 
     api_url: str = Field(
         default="http://127.0.0.1:8090",
@@ -89,18 +107,42 @@ class JevConfig(PluginConfigBase):
     )
 
 
+class LlmConfig(PluginConfigBase):
+    """兼容 LLM 服务连接配置。"""
+
+    __ui_label__ = "LLM 服务"
+    __ui_icon__ = "brain"
+    __ui_order__ = 3
+
+    base_url: str = Field(
+        default="https://maas-api.cn-huabei-1.xf-yun.com/v2",
+        description="OpenAI 兼容 Chat Completions 服务地址，例如 Spark X2.6 的 /v2",
+    )
+    api_key: str = Field(
+        default="",
+        description="LLM API Key，按 Bearer 发送；只保存在本地配置，不要提交到仓库",
+    )
+    model: str = Field(default="spark-x2.6", description="LLM 模型名，例如 spark-x2.6")
+    timeout_seconds: float = Field(
+        default=15.0,
+        ge=1.0,
+        le=60.0,
+        description="单次 LLM 请求超时秒数",
+    )
+
+
 class DecisionConfig(PluginConfigBase):
     """接话判断配置。"""
 
     __ui_label__ = "接话判断"
     __ui_icon__ = "message-circle"
-    __ui_order__ = 2
+    __ui_order__ = 4
 
     reply_threshold: float = Field(
         default=0.3,
         ge=0.0,
         le=1.0,
-        description="JEV 给出的回复概率达到该值才继续回复；越高越容易保持安静",
+        description="决策服务给出的回复概率达到该值才继续回复；越高越容易保持安静",
     )
 
 
@@ -109,7 +151,7 @@ class UnfinishedConfig(PluginConfigBase):
 
     __ui_label__ = "未完成事项"
     __ui_icon__ = "list-checks"
-    __ui_order__ = 3
+    __ui_order__ = 5
 
     enabled: bool = Field(default=True, description="bot 发话结束后扫描是否有未完成承诺或待办")
     scan_delay_seconds: float = Field(
@@ -122,7 +164,7 @@ class UnfinishedConfig(PluginConfigBase):
         default=0.5,
         ge=0.0,
         le=1.0,
-        description="JEV 判定存在未完成事项的概率达到该值才触发主动搭话",
+        description="决策服务判定存在未完成事项的概率达到该值才触发主动搭话",
     )
 
 
@@ -131,14 +173,14 @@ class DuplicateConfig(PluginConfigBase):
 
     __ui_label__ = "重复低效过滤"
     __ui_icon__ = "repeat"
-    __ui_order__ = 4
+    __ui_order__ = 6
 
     enabled: bool = Field(default=True, description="replyer 生成后判断是否重复低效，必要时请求重生成")
     threshold: float = Field(
         default=0.6,
         ge=0.0,
         le=1.0,
-        description="JEV 判定重复低效的概率达到该值才请求重生成",
+        description="决策服务判定重复低效的概率达到该值才请求重生成",
     )
     max_retries: int = Field(
         default=3,
@@ -152,7 +194,9 @@ class JevReplyGateConfig(PluginConfigBase):
     """JEV 接话判断完整配置。"""
 
     plugin: PluginSectionConfig = Field(default_factory=PluginSectionConfig)
+    service: ServiceConfig = Field(default_factory=ServiceConfig)
     jev: JevConfig = Field(default_factory=JevConfig)
+    llm: LlmConfig = Field(default_factory=LlmConfig)
     decision: DecisionConfig = Field(default_factory=DecisionConfig)
     unfinished: UnfinishedConfig = Field(default_factory=UnfinishedConfig)
     duplicate: DuplicateConfig = Field(default_factory=DuplicateConfig)
@@ -236,31 +280,156 @@ def _systemone_url(api_url: str) -> str:
     return f"{normalized}/v1/systemone"
 
 
-def _post_json(url: str, payload: Dict[str, Any], timeout: float) -> Dict[str, Any]:
+def _post_json(
+    url: str,
+    payload: Dict[str, Any],
+    timeout: float,
+    headers: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    request = Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+    request = Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json", **(headers or {})},
+        method="POST",
+    )
     try:
         with urlopen(request, timeout=timeout) as response:
             raw = response.read()
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"JEV 服务返回 HTTP {exc.code}: {detail[:500]}") from exc
+        raise RuntimeError(f"决策服务返回 HTTP {exc.code}: {detail[:500]}") from exc
     data = json.loads(raw.decode("utf-8"))
     if not isinstance(data, dict):
-        raise RuntimeError("JEV 服务返回的不是 JSON 对象")
+        raise RuntimeError("决策服务返回的不是 JSON 对象")
     return data
+
+
+def _chat_completions_url(base_url: str) -> str:
+    normalized = base_url.strip().rstrip("/")
+    if not normalized:
+        raise ValueError("LLM base_url 不能为空")
+    if normalized.endswith("/chat/completions"):
+        return normalized
+    return f"{normalized}/chat/completions"
+
+
+def _noul_options(question: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+    criteria = question.get("criteria")
+    true_text = "yes"
+    false_text = "no"
+    if isinstance(criteria, dict):
+        true_text = str(criteria.get("true") or true_text)
+        false_text = str(criteria.get("false") or false_text)
+    return ["true", "false"], [f"Yes: {true_text}", f"No: {false_text}"]
+
+
+def _build_llm_body(
+    llm: LlmConfig,
+    state_messages: List[Dict[str, str]],
+    question: Dict[str, Any],
+    prefill_mode: bool,
+    thinking_flags: bool = True,
+) -> Dict[str, Any]:
+    _, option_texts = _noul_options(question)
+    head = str(question.get("instructions") or "Answer using the options below.")
+    tail = (
+        f"Question: {head}\nOptions:\nA. {option_texts[0]}\nB. {option_texts[1]}\n"
+        "Reply with exactly one option letter. Do not explain."
+    )
+    messages = [dict(message) for message in state_messages]
+    messages.append({"role": "user", "content": tail})
+    if prefill_mode:
+        messages.append({"role": "assistant", "content": ANSWER_PREFIX})
+    body: Dict[str, Any] = {
+        "model": llm.model.strip(),
+        "messages": messages,
+        "max_tokens": 1,
+        "temperature": 0.0,
+        "logprobs": True,
+        "top_logprobs": LLM_TOP_LOGPROBS,
+    }
+    if thinking_flags:
+        body["enable_thinking"] = False
+        body["chat_template_kwargs"] = {"enable_thinking": False}
+    if prefill_mode:
+        body["continue_final_message"] = True
+        body["add_generation_prompt"] = False
+    return body
+
+
+def _extract_llm_rows(choice: Dict[str, Any]) -> List[Dict[str, Any]]:
+    logprobs = choice.get("logprobs")
+    if not isinstance(logprobs, dict):
+        return []
+    content = logprobs.get("content")
+    if isinstance(content, list) and content and isinstance(content[0], dict):
+        rows = content[0].get("top_logprobs")
+        if isinstance(rows, list):
+            return [row for row in rows if isinstance(row, dict)]
+    rows = logprobs.get("top_logprobs")
+    if isinstance(rows, list):
+        return [row for row in rows if isinstance(row, dict)]
+    return []
+
+
+def _rows_to_label_logprobs(rows: List[Dict[str, Any]], labels: List[str]) -> Dict[str, float]:
+    if not rows:
+        return {}
+    declared = set(labels)
+    result: Dict[str, float] = {}
+    for row in rows:
+        token = row.get("token")
+        if not isinstance(token, str):
+            continue
+        match = LABEL_TOKEN_PATTERN.match(token)
+        if not match or match.group(1) not in declared:
+            continue
+        try:
+            logprob = float(row.get("logprob", -30.0))
+        except (TypeError, ValueError):
+            logprob = -30.0
+        label = match.group(1)
+        result[label] = max(result.get(label, -math.inf), logprob)
+    return result
+
+
+def _normalize_label_logprobs(
+    label_logprobs: Dict[str, float],
+    keys: List[str],
+    labels: List[str],
+    temperature: float = 1.0,
+) -> Dict[str, float]:
+    values = [label_logprobs.get(label, -math.inf) for label in labels]
+    finite = [value for value in values if math.isfinite(value)]
+    if not finite:
+        raise RuntimeError("LLM 返回的 logprobs 中没有可用的选项标签")
+    peak = max(finite)
+    temp = max(0.05, float(temperature))
+    weights = [math.exp((value - peak) / temp) if math.isfinite(value) else 0.0 for value in values]
+    total = math.fsum(weights)
+    if total <= 0:
+        raise RuntimeError("LLM 选项概率归一化失败")
+    return {key: weight / total for key, weight in zip(keys, weights, strict=False)}
+
+
+def _entropy_confidence(probabilities: List[float]) -> float:
+    if len(probabilities) < 2:
+        return 0.0
+    entropy = -math.fsum(value * math.log(value) for value in probabilities if value > 0)
+    return max(0.0, min(1.0, 1.0 - entropy / math.log(len(probabilities))))
 
 
 def _extract_noul_probability(data: Dict[str, Any], question_id: str) -> float:
     answers = data.get("answers")
     if not isinstance(answers, dict):
-        raise RuntimeError("JEV 响应缺少 answers")
+        raise RuntimeError("决策服务响应缺少 answers")
     answer = answers.get(question_id)
     if not isinstance(answer, dict):
-        raise RuntimeError(f"JEV 响应缺少 {question_id} 答案")
+        raise RuntimeError(f"决策服务响应缺少 {question_id} 答案")
     probability = answer.get("noul")
     if not isinstance(probability, (int, float)):
-        raise RuntimeError(f"JEV 响应缺少 {question_id} 的 noul 概率")
+        raise RuntimeError(f"决策服务响应缺少 {question_id} 的 noul 概率")
     return float(probability)
 
 
@@ -279,11 +448,23 @@ class JevReplyGatePlugin(MaiBotPlugin):
         self._scan_generations: Dict[str, int] = {}
         self._handled_rounds: Dict[str, Deque[str]] = {}
         self._last_user_message_ids: Dict[str, str] = {}
+        self._llm_probe_lock = asyncio.Lock()
+        self._llm_probe_key: Optional[Tuple[str, str, str]] = None
+        self._llm_probe_result: Optional[Tuple[bool, bool]] = None
+        self._llm_probe_task: Optional[asyncio.Task[None]] = None
 
     async def on_load(self) -> None:
-        return None
+        config = cast(JevReplyGateConfig, self.config)
+        if config.plugin.enabled and config.service.mode == "llm":
+            self._llm_probe_task = asyncio.create_task(
+                self._startup_llm_probe(),
+                name=f"{PLUGIN_ID}.llm_probe",
+            )
 
     async def on_unload(self) -> None:
+        if self._llm_probe_task is not None:
+            self._llm_probe_task.cancel()
+            self._llm_probe_task = None
         self._cancel_all_scans()
         self._last_user_message_ids.clear()
         self._handled_rounds.clear()
@@ -291,8 +472,18 @@ class JevReplyGatePlugin(MaiBotPlugin):
     async def on_config_update(self, scope: str, config_data: Dict[str, Any], version: str) -> None:
         del scope, config_data, version
         config = cast(JevReplyGateConfig, self.config)
+        self._llm_probe_key = None
+        self._llm_probe_result = None
+        if self._llm_probe_task is not None:
+            self._llm_probe_task.cancel()
+            self._llm_probe_task = None
         if not config.plugin.enabled or not config.unfinished.enabled:
             self._cancel_all_scans()
+        if config.plugin.enabled and config.service.mode == "llm":
+            self._llm_probe_task = asyncio.create_task(
+                self._startup_llm_probe(),
+                name=f"{PLUGIN_ID}.llm_probe",
+            )
 
     @HookHandler(
         "maisaka.replyer.before_request",
@@ -525,6 +716,128 @@ class JevReplyGatePlugin(MaiBotPlugin):
         url = _systemone_url(config.jev.api_url)
         return await asyncio.to_thread(_post_json, url, payload, config.jev.timeout_seconds)
 
+    async def _request_decisions(
+        self,
+        state_messages: List[Dict[str, str]],
+        questions: Dict[str, Any],
+        config: JevReplyGateConfig,
+    ) -> Dict[str, Any]:
+        if config.service.mode == "llm":
+            return await self._request_llm_systemone(state_messages, questions, config)
+        return await self._request_jev_state(state_messages, questions, config)
+
+    async def _request_llm_systemone(
+        self,
+        state_messages: List[Dict[str, str]],
+        questions: Dict[str, Any],
+        config: JevReplyGateConfig,
+    ) -> Dict[str, Any]:
+        prefill_mode, thinking_flags = await self._ensure_llm_ready(config)
+        url = _chat_completions_url(config.llm.base_url)
+        headers = {"Authorization": f"Bearer {config.llm.api_key.strip()}"}
+        answers: Dict[str, Any] = {}
+        usage = {"input_tokens": 0, "output_tokens": 0}
+        for question_id, question in questions.items():
+            if not isinstance(question, dict) or question.get("type") != "noul":
+                raise ValueError("LLM 模式只支持 noul 问题")
+            body = _build_llm_body(config.llm, state_messages, question, prefill_mode, thinking_flags)
+            data = await asyncio.to_thread(
+                _post_json,
+                url,
+                body,
+                config.llm.timeout_seconds,
+                headers,
+            )
+            choice = (data.get("choices") or [{}])[0]
+            rows = _extract_llm_rows(choice)
+            keys, _ = _noul_options(question)
+            label_logprobs = _rows_to_label_logprobs(rows, ["A", "B"])
+            probabilities = _normalize_label_logprobs(label_logprobs, keys, ["A", "B"], 1.0)
+            answers[question_id] = {
+                "type": "noul",
+                "noul": probabilities["true"],
+                "probabilities": probabilities,
+                "confidence": _entropy_confidence([probabilities[key] for key in keys]),
+            }
+            raw_usage = data.get("usage")
+            if isinstance(raw_usage, dict):
+                usage["input_tokens"] += int(raw_usage.get("prompt_tokens") or 0)
+                usage["output_tokens"] += int(raw_usage.get("completion_tokens") or 0)
+        return {"answers": answers, "usage": usage}
+
+    async def _ensure_llm_ready(self, config: JevReplyGateConfig) -> Tuple[bool, bool]:
+        llm = config.llm
+        key = (llm.base_url.strip(), llm.model.strip(), llm.api_key.strip())
+        if self._llm_probe_key == key and self._llm_probe_result is not None:
+            return self._llm_probe_result
+        async with self._llm_probe_lock:
+            if self._llm_probe_key == key and self._llm_probe_result is not None:
+                return self._llm_probe_result
+            try:
+                probe_result = await asyncio.to_thread(self._probe_llm_logprobs, llm)
+            except Exception as exc:
+                self.ctx.logger.warning(
+                    "LLM logprobs 检测失败: base=%s model=%s error=%s",
+                    llm.base_url,
+                    llm.model,
+                    exc,
+                )
+                raise
+            self._llm_probe_key = key
+            self._llm_probe_result = probe_result
+            self.ctx.logger.info(
+                "LLM logprobs 检测通过: base=%s model=%s prefill=%s thinking_flags=%s",
+                llm.base_url,
+                llm.model,
+                probe_result[0],
+                probe_result[1],
+            )
+            return probe_result
+
+    async def _startup_llm_probe(self) -> None:
+        try:
+            await self._ensure_llm_ready(cast(JevReplyGateConfig, self.config))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
+    @staticmethod
+    def _probe_llm_logprobs(llm: LlmConfig) -> Tuple[bool, bool]:
+        if not llm.api_key.strip():
+            raise RuntimeError("LLM api_key 未配置")
+        if not llm.model.strip():
+            raise RuntimeError("LLM model 未配置")
+        url = _chat_completions_url(llm.base_url)
+        headers = {"Authorization": f"Bearer {llm.api_key.strip()}"}
+        question: Dict[str, Any] = {
+            "type": "noul",
+            "instructions": "Choose one option.",
+            "criteria": {"true": "yes", "false": "no"},
+        }
+        probe_timeout = min(llm.timeout_seconds, 5.0)
+        last_error = "未知错误"
+        for prefill_mode in (True, False):
+            for thinking_flags in (True, False):
+                try:
+                    body = _build_llm_body(
+                        llm,
+                        [{"role": "user", "content": "Capability probe."}],
+                        question,
+                        prefill_mode,
+                        thinking_flags,
+                    )
+                    data = _post_json(url, body, probe_timeout, headers)
+                    choice = (data.get("choices") or [{}])[0]
+                    rows = _extract_llm_rows(choice)
+                    label_logprobs = _rows_to_label_logprobs(rows, ["A", "B"])
+                    if label_logprobs:
+                        return prefill_mode, thinking_flags
+                    last_error = "logprobs 中没有 A/B 标签"
+                except Exception as exc:
+                    last_error = str(exc)
+        raise RuntimeError(f"LLM API 不支持 logprobs 或返回格式不兼容: {last_error}")
+
     async def _request_jev(
         self,
         messages: List[Dict[str, Any]],
@@ -534,7 +847,7 @@ class JevReplyGatePlugin(MaiBotPlugin):
         config: JevReplyGateConfig,
     ) -> Dict[str, Any]:
         state_messages = _build_jev_state(messages, bot_account_id, system_prompt)
-        return await self._request_jev_state(state_messages, questions, config)
+        return await self._request_decisions(state_messages, questions, config)
 
     async def _ask_jev(
         self,
@@ -550,7 +863,7 @@ class JevReplyGatePlugin(MaiBotPlugin):
             {
                 "reply": {
                     "type": "noul",
-                    "instructions": QUESTION_INSTRUCTIONS.format(draft_text=draft_text or "（没有额外说明。）"),
+                    "instructions": QUESTION_INSTRUCTIONS.format(draft_reply=draft_text or "（没有额外说明。）"),
                     "criteria": QUESTION_CRITERIA,
                 }
             },
@@ -590,7 +903,7 @@ class JevReplyGatePlugin(MaiBotPlugin):
         if last_user_message:
             state_messages.append({"role": "user", "content": last_user_message})
         state_messages.append({"role": "assistant", "content": last_bot_message})
-        data = await self._request_jev_state(
+        data = await self._request_decisions(
             state_messages,
             {
                 "duplicate": {
