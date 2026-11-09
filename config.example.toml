@@ -1,0 +1,31 @@
+[plugin]
+enabled = true
+config_version = "1.2.0"
+
+[jev]
+# 兼容 /v1/systemone 的决策服务地址。
+api_url = "http://127.0.0.1:8090"
+# 请求中携带的模型名；留空使用服务默认值。
+model = ""
+# 单次决策请求超时秒数。
+timeout_seconds = 8.0
+
+[decision]
+# 回复概率达到该值才继续接话；越高越安静。
+reply_threshold = 0.3
+
+[unfinished]
+# bot 发话结束后扫描是否有未完成承诺或待办。
+enabled = true
+# 最后一条 bot 消息后等待多久扫描，最大 120 秒。
+scan_delay_seconds = 120.0
+# 判定存在未完成事项的概率阈值。
+threshold = 0.5
+
+[duplicate]
+# replyer 生成后判断是否重复低效，必要时请求重生成。
+enabled = true
+# 判定重复低效的概率阈值。
+threshold = 0.6
+# 最多请求重生成几次；受主程序 Hook 重试上限 3 约束，0 表示不重试。
+max_retries = 3
