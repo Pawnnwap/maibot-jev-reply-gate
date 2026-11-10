@@ -27,6 +27,11 @@ LLM 模式首次使用时会自动探测 API 是否支持 logprobs、assistant p
 ## 配置
 
 ```toml
+[features]
+reply_enabled = true
+duplicate_enabled = true
+unfinished_enabled = true
+
 [service]
 mode = "jev"
 
@@ -45,22 +50,30 @@ timeout_seconds = 5.0
 reply_threshold = 0.3
 
 [unfinished]
-enabled = true
 scan_delay_seconds = 120.0
 threshold = 0.5
 
 [duplicate]
-enabled = true
 threshold = 0.6
 max_retries = 3
 ```
 
+- `features.reply_enabled` / `features.duplicate_enabled` / `features.unfinished_enabled`：分别控制接话判断、重复低效过滤和未完成事项检测；关闭后，对应设置区块会在下次打开配置页时折叠。
 - `service.mode`：`jev` 或 `llm`，二选一。
 - `decision.reply_threshold`：回复概率达到该值才继续接话，越高越安静。
 - `unfinished.scan_delay_seconds`：最后一条 bot 消息后等待多久扫描，最大 120 秒；收到新私聊消息会取消本轮扫描。
 - `unfinished.threshold`：判定存在未完成事项的概率阈值。
 - `duplicate.threshold`：判定重复低效的概率阈值。
 - `duplicate.max_retries`：最多请求重生成几次；受主程序 Hook 重试上限 3 约束。
+
+`[prompts]` 集中放置所有判断提示词，均带内置默认值。WebUI 只展示最常用的判定标准：
+
+- `reply_criteria_true` / `reply_criteria_false`：需要回复 / 不用回复的情形。
+- `duplicate_criteria`：重复判断标准。
+
+系统提示词、问题模板、拦下/重生成文案、未完成事项意图等技术性 Prompt 默认隐藏在配置文件中，需要时可直接在 `config.toml` 覆盖，无需在 WebUI 中暴露。
+
+模板占位符：`{draft_reply}`、`{last_bot}`、`{candidate}`、`{criteria}`、`{last_message}`、`{probability}`、`{threshold}`。
 
 LLM 模式的 `api_key` 只保存在本地 `config.toml`，不要提交到版本控制。
 

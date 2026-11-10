@@ -1,4 +1,4 @@
-"""用 JEV 决策服务判断麦麦是否继续回复最新私聊消息。"""
+"""用 JEV 决策服务判断是否继续回复最新私聊消息。"""
 
 from __future__ import annotations
 
@@ -22,44 +22,51 @@ MAX_DRAFT_CHARS = 1200
 ANSWER_PREFIX = "答案："
 LLM_TOP_LOGPROBS = 5
 LABEL_TOKEN_PATTERN = re.compile(r"^\s*([A-Z]{1,2})[\.\):：,、]?\s*$")
-SYSTEM_PROMPT = """你叫麦麦，正在和对方私聊。判断麦麦现在还要不要继续回复最新一条用户消息。
+SYSTEM_PROMPT = """你正在和对方私聊。判断你现在还要不要继续回复最新一条用户消息。
 只依据聊天记录和下面的拟回复判断。
 
 1. 用户只回“嗯嗯”“好呀”“好的”“收到”“谢谢”“哈哈”“晚安”“先这样”“行吧”等短词，通常表示听到了、同意或准备结束。
-2. 如果麦麦上一条已经回答、确认或处理了用户的最新需求，这些短回应就是收尾信号，不必再回“不客气”“好的呀”“哈哈”。
+2. 如果你上一条已经回答、确认或处理了用户的最新需求，这些短回应就是收尾信号，不必再回“不客气”“好的呀”“哈哈”。
 3. 只有最新消息提出新问题、请求、新信息、新话题、纠正，明确表达情绪并希望被接住，或继续追问；或者拟回复会给出用户尚未得到的新内容、确认下一步行动时，才继续回复。
-4. 用户只是对麦麦的提议说“好呀”时，如果拟回复要落实提议、确认细节或执行下一步，就回复；如果只是再客套一句，就不回复。
+4. 用户只是对你的提议说“好呀”时，如果拟回复要落实提议、确认细节或执行下一步，就回复；如果只是再客套一句，就不回复。
 5. 不确定时，优先不回复。"""
-QUESTION_INSTRUCTIONS = """结合最近的私聊记录和下面的拟回复，麦麦现在应该继续回复最新这条用户消息吗？
+QUESTION_INSTRUCTIONS = """结合最近的私聊记录和下面的拟回复，你现在应该继续回复最新这条用户消息吗？
 拟回复（仅供判断，不是用户的话）：
 {draft_reply}"""
 QUESTION_CRITERIA = {
     "true": "应该回复：最新消息提出了问题、请求、新信息、新话题、纠正，或拟回复包含用户尚未得到的新内容、需要落实的下一步。",
-    "false": "不必回复：最新消息只是嗯嗯、好呀、好的、收到、谢谢、哈哈、晚安等附和或收尾，麦麦已经回应过用户的最新需求；或拟回复只是想再附和、客套一句。",
+    "false": "不必回复：最新消息只是嗯嗯、好呀、好的、收到、谢谢、哈哈、晚安等附和或收尾，你已经回应过用户的最新需求；或拟回复只是想再附和、客套一句。",
 }
-UNFINISHED_SYSTEM_PROMPT = """检查上一轮私聊结束后，麦麦是否还有没做完的事。只依据聊天记录判断。
-重点看麦麦明确承诺、但还没兑现的事，如“我去搜一下”“稍后给你结论”“等我查查”“马上帮你弄”。
-用户提出明确请求（帮我看/帮我查/怎么解决），麦麦只回“收到/好呀/稍后”而没有行动或结论，也算未完成。
+UNFINISHED_SYSTEM_PROMPT = """检查上一轮私聊结束后，你是否还有没做完的事。只依据聊天记录判断。
+重点看你明确承诺、但还没兑现的事，如“我去搜一下”“稍后给你结论”“等我查查”“马上帮你弄”。
+用户提出明确请求（帮我看/帮我查/怎么解决），你只回“收到/好呀/稍后”而没有行动或结论，也算未完成。
 正常收尾、闲聊、道别，或已经给出结论/完成动作，不算未完成。
 用户后来取消请求、说“不用了”，或话题已明确转移，不算未完成。"""
-UNFINISHED_QUESTION = "上一轮对话结束后，麦麦是否还有明确承诺或待办没有完成？只有确实需要继续行动时才选 Yes。"
+UNFINISHED_QUESTION = "上一轮对话结束后，你是否还有明确承诺或待办没有完成？只有确实需要继续行动时才选 Yes。"
 UNFINISHED_CRITERIA = {
-    "true": "有未完成事项：麦麦明确说要搜索、查证、整理、稍后给结论或帮用户做什么，但还没有结果或完成动作；或用户提出了明确请求而麦麦尚未处理。",
-    "false": "没有未完成事项：麦麦已经回答完用户的问题、给出结论或完成动作；只是普通收尾、道别、闲聊；用户已取消请求或转移话题；或没有需要继续处理的事。",
+    "true": "有未完成事项：你明确说要搜索、查证、整理、稍后给结论或帮用户做什么，但还没有结果或完成动作；或用户提出了明确请求而你尚未处理。",
+    "false": "没有未完成事项：你已经回答完用户的问题、给出结论或完成动作；只是普通收尾、道别、闲聊；用户已取消请求或转移话题；或没有需要继续处理的事。",
 }
-DUPLICATE_SYSTEM_PROMPT = """比较麦麦最近一条回复和候选回复。只依据给出的聊天上下文和两条文本判断。
+DUPLICATE_SYSTEM_PROMPT = """比较你最近一条回复和候选回复。只依据给出的聊天上下文和两条文本判断。
 两条回复意思相同、候选只是换个说法，或候选几乎没有新增信息，就算重复。
 候选带来新信息、回应用户最新消息、推进话题，就不算重复。"""
-DUPLICATE_QUESTION_TEMPLATE = """麦麦最近一条回复：
+DUPLICATE_QUESTION_TEMPLATE = """你最近一条回复：
 「{last_bot}」
 
 候选回复：
 「{candidate}」
 
+判断标准：
+{criteria}
+
 候选回复是否重复低效（与最近一条回复意思重复、没有新增信息、没有推进对话）？"""
-DUPLICATE_CRITERIA = {
-    "true": "重复低效：候选回复和麦麦最近一条回复意思相同，或只是换皮复读，没有新增信息，没有推进对话。",
-    "false": "不重复低效：候选回复有新信息、回应了用户最新消息、推进了话题，或完成了用户请求；即使简短也不算重复。",
+DUPLICATE_CRITERIA = (
+    "两条回复意思相同、候选只是换个说法，或候选几乎没有新增信息，就算重复。\n"
+    "候选带来新信息、回应用户最新消息、推进话题，就不算重复。"
+)
+DUPLICATE_OPTION_CRITERIA = {
+    "true": "符合判断标准，属于重复低效。",
+    "false": "不符合判断标准，不属于重复低效。",
 }
 
 
@@ -71,7 +78,31 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用 JEV 接话判断")
-    config_version: str = Field(default="1.3.1", description="配置版本")
+    config_version: str = Field(default="1.4.0", description="配置版本")
+
+
+class FeatureConfig(PluginConfigBase):
+    """三个功能的总开关。"""
+
+    __ui_label__ = "功能开关"
+    __ui_icon__ = "toggle-left"
+    __ui_order__ = 1
+
+    reply_enabled: bool = Field(
+        default=True,
+        description="是否启用接话判断",
+        json_schema_extra={"label": "接话判断", "hint": "关闭后不再判断私聊是否继续回复。"},
+    )
+    duplicate_enabled: bool = Field(
+        default=True,
+        description="是否启用重复低效过滤",
+        json_schema_extra={"label": "重复低效过滤", "hint": "关闭后不再请求 replyer 重生成。"},
+    )
+    unfinished_enabled: bool = Field(
+        default=True,
+        description="是否启用未完成事项检测",
+        json_schema_extra={"label": "未完成事项", "hint": "关闭后不再扫描未兑现的承诺或待办。"},
+    )
 
 
 class ServiceConfig(PluginConfigBase):
@@ -79,7 +110,7 @@ class ServiceConfig(PluginConfigBase):
 
     __ui_label__ = "服务选择"
     __ui_icon__ = "shuffle"
-    __ui_order__ = 1
+    __ui_order__ = 2
 
     mode: Literal["jev", "llm"] = Field(
         default="jev",
@@ -92,11 +123,11 @@ class JevConfig(PluginConfigBase):
 
     __ui_label__ = "JEV 服务"
     __ui_icon__ = "server"
-    __ui_order__ = 2
+    __ui_order__ = 3
 
     api_url: str = Field(
         default="http://127.0.0.1:8090",
-        description="兼容 /v1/systemone 的决策服务地址；默认 http://127.0.0.1:8090",
+        description="JEV /v1/systemone 服务地址；默认 8090（8091 是 llama-server，不是决策接口）",
     )
     model: str = Field(default="", description="请求中携带的模型名；留空使用服务默认值")
     timeout_seconds: float = Field(
@@ -112,7 +143,7 @@ class LlmConfig(PluginConfigBase):
 
     __ui_label__ = "LLM 服务"
     __ui_icon__ = "brain"
-    __ui_order__ = 3
+    __ui_order__ = 4
 
     base_url: str = Field(
         default="https://maas-api.cn-huabei-1.xf-yun.com/v2",
@@ -131,12 +162,209 @@ class LlmConfig(PluginConfigBase):
     )
 
 
+class PromptConfig(PluginConfigBase):
+    """控制继续接话和重复过滤的判断依据；其余技术性 Prompt 已隐藏，可在配置文件中手动覆盖。"""
+
+    __ui_label__ = "判断标准"
+    __ui_icon__ = "file-text"
+    __ui_order__ = 5
+
+    reply_system_prompt: str = Field(
+        default=SYSTEM_PROMPT,
+        description="接话判断的系统提示词",
+        json_schema_extra={
+            "label": "接话判断系统提示词",
+            "hidden": True,
+            "hint": "作为 system 消息发送，定义你的角色定位和总体判断原则。",
+            "x-widget": "textarea",
+            "rows": 8,
+            "group": "接话判断",
+        },
+    )
+    reply_question_template: str = Field(
+        default=QUESTION_INSTRUCTIONS,
+        description="接话判断的问题模板，支持 {draft_reply} 占位符",
+        json_schema_extra={
+            "label": "接话判断问题模板",
+            "hidden": True,
+            "hint": "支持 {draft_reply}，会被替换为 replyer 的拟回复内容。",
+            "x-widget": "textarea",
+            "rows": 4,
+            "group": "接话判断",
+        },
+    )
+    reply_criteria_true: str = Field(
+        default=QUESTION_CRITERIA["true"],
+        description="需要回复的情形",
+        json_schema_extra={
+            "label": "需要回复的情形",
+            "hint": "什么情况下应该继续回复；写成判断依据即可。",
+            "x-widget": "textarea",
+            "rows": 4,
+            "group": "接话判断",
+        },
+    )
+    reply_criteria_false: str = Field(
+        default=QUESTION_CRITERIA["false"],
+        description="不用回复的情形",
+        json_schema_extra={
+            "label": "不用回复的情形",
+            "hint": "什么情况下应该保持安静；写成判断依据即可。",
+            "x-widget": "textarea",
+            "rows": 4,
+            "group": "接话判断",
+        },
+    )
+    reply_empty_draft: str = Field(
+        default="（没有额外说明。）",
+        description="拟回复内容为空时填入问题模板的文本",
+        json_schema_extra={
+            "label": "拟回复为空的占位文案",
+            "hidden": True,
+            "hint": "reply_reason 和 reply_reference 都为空时，用它替换 {draft_reply}。",
+            "x-widget": "textarea",
+            "rows": 2,
+            "group": "接话判断",
+        },
+    )
+    reply_blocked_reason: str = Field(
+        default=(
+            "主动保持安静（非故障）：最新私聊消息只是收尾或附和"
+            "（回复概率 {probability:.2f}，阈值 {threshold:.2f}），你已经回应过用户的最新需求。"
+            "请结束本轮，不要重复回复。"
+        ),
+        description="接话判断拦下回复时写回 replyer 的原因说明",
+        json_schema_extra={
+            "label": "拦下回复的原因说明",
+            "hidden": True,
+            "hint": "支持 {probability} 和 {threshold} 占位符。",
+            "x-widget": "textarea",
+            "rows": 3,
+            "group": "接话判断",
+        },
+    )
+    duplicate_system_prompt: str = Field(
+        default=DUPLICATE_SYSTEM_PROMPT,
+        description="重复低效判断的系统提示词",
+        json_schema_extra={
+            "label": "重复判断系统提示词",
+            "hidden": True,
+            "hint": "作为 system 消息发送，定义重复低效的总体判断原则。",
+            "x-widget": "textarea",
+            "rows": 4,
+            "group": "重复判断",
+        },
+    )
+    duplicate_question_template: str = Field(
+        default=DUPLICATE_QUESTION_TEMPLATE,
+        description="重复低效判断的问题模板，支持 {last_bot}、{candidate} 和 {criteria} 占位符",
+        json_schema_extra={
+            "label": "重复判断问题模板",
+            "hidden": True,
+            "hint": "支持 {last_bot}、{candidate} 和 {criteria} 占位符。",
+            "x-widget": "textarea",
+            "rows": 6,
+            "group": "重复判断",
+        },
+    )
+    duplicate_criteria: str = Field(
+        default=DUPLICATE_CRITERIA,
+        description="重复判断标准",
+        json_schema_extra={
+            "label": "重复判断标准",
+            "hint": "写清楚什么情况算重复低效；会同时用于判断候选回复是否与上一条重复。",
+            "x-widget": "textarea",
+            "rows": 4,
+            "group": "重复判断",
+        },
+    )
+    duplicate_retry_reason: str = Field(
+        default=(
+            "重复度{probability:.0%}，属于重复低效。"
+            "请换一个信息点或角度，避免复读最近说过的话，也不要只是把用户的话换个说法。"
+        ),
+        description="请求 replyer 重生成时写回的原因说明",
+        json_schema_extra={
+            "label": "重复低效重生成提示",
+            "hidden": True,
+            "hint": "支持 {probability} 占位符。",
+            "x-widget": "textarea",
+            "rows": 3,
+            "group": "重复低效过滤",
+        },
+    )
+    unfinished_system_prompt: str = Field(
+        default=UNFINISHED_SYSTEM_PROMPT,
+        description="未完成事项检测的系统提示词",
+        json_schema_extra={
+            "label": "未完成事项系统提示词",
+            "hidden": True,
+            "hint": "作为 system 消息发送，定义什么算未完成事项。",
+            "x-widget": "textarea",
+            "rows": 5,
+            "group": "未完成事项",
+        },
+    )
+    unfinished_question: str = Field(
+        default=UNFINISHED_QUESTION,
+        description="未完成事项检测的问题",
+        json_schema_extra={
+            "label": "未完成事项问题",
+            "hidden": True,
+            "hint": "交给决策服务的判断题，通常以“是否”结尾。",
+            "x-widget": "textarea",
+            "rows": 3,
+            "group": "未完成事项",
+        },
+    )
+    unfinished_criteria_true: str = Field(
+        default=UNFINISHED_CRITERIA["true"],
+        description="检测到未完成事项的情形",
+        json_schema_extra={
+            "label": "检测到未完成事项的情形",
+            "hidden": True,
+            "hint": "作为 Yes 选项的说明。",
+            "x-widget": "textarea",
+            "rows": 3,
+            "group": "未完成事项",
+        },
+    )
+    unfinished_criteria_false: str = Field(
+        default=UNFINISHED_CRITERIA["false"],
+        description="没有未完成事项的情形",
+        json_schema_extra={
+            "label": "没有未完成事项的情形",
+            "hidden": True,
+            "hint": "作为 No 选项的说明。",
+            "x-widget": "textarea",
+            "rows": 3,
+            "group": "未完成事项",
+        },
+    )
+    unfinished_intent_template: str = Field(
+        default=(
+            "上一轮对话结束后，检查发现你还有未完成的事，尤其是你答应过用户但还没兑现的承诺。"
+            "请回看最近聊天，先完成这件事（需要查资料就调用工具或子代理），再自然地向用户补充结果；"
+            "不要开启无关话题。\n你最后一条消息是：“{last_message}”"
+        ),
+        description="触发主动搭话时使用的意图模板，支持 {last_message} 占位符",
+        json_schema_extra={
+            "label": "主动搭话意图模板",
+            "hidden": True,
+            "hint": "支持 {last_message}，会替换为你最后一条消息的前 200 字。",
+            "x-widget": "textarea",
+            "rows": 5,
+            "group": "未完成事项",
+        },
+    )
+
+
 class DecisionConfig(PluginConfigBase):
     """接话判断配置。"""
 
     __ui_label__ = "接话判断"
     __ui_icon__ = "message-circle"
-    __ui_order__ = 4
+    __ui_order__ = 6
 
     reply_threshold: float = Field(
         default=0.3,
@@ -151,9 +379,8 @@ class UnfinishedConfig(PluginConfigBase):
 
     __ui_label__ = "未完成事项"
     __ui_icon__ = "list-checks"
-    __ui_order__ = 5
+    __ui_order__ = 7
 
-    enabled: bool = Field(default=True, description="bot 发话结束后扫描是否有未完成承诺或待办")
     scan_delay_seconds: float = Field(
         default=120.0,
         ge=10.0,
@@ -173,9 +400,8 @@ class DuplicateConfig(PluginConfigBase):
 
     __ui_label__ = "重复低效过滤"
     __ui_icon__ = "repeat"
-    __ui_order__ = 6
+    __ui_order__ = 8
 
-    enabled: bool = Field(default=True, description="replyer 生成后判断是否重复低效，必要时请求重生成")
     threshold: float = Field(
         default=0.6,
         ge=0.0,
@@ -194,9 +420,11 @@ class JevReplyGateConfig(PluginConfigBase):
     """JEV 接话判断完整配置。"""
 
     plugin: PluginSectionConfig = Field(default_factory=PluginSectionConfig)
+    features: FeatureConfig = Field(default_factory=FeatureConfig)
     service: ServiceConfig = Field(default_factory=ServiceConfig)
     jev: JevConfig = Field(default_factory=JevConfig)
     llm: LlmConfig = Field(default_factory=LlmConfig)
+    prompts: PromptConfig = Field(default_factory=PromptConfig)
     decision: DecisionConfig = Field(default_factory=DecisionConfig)
     unfinished: UnfinishedConfig = Field(default_factory=UnfinishedConfig)
     duplicate: DuplicateConfig = Field(default_factory=DuplicateConfig)
@@ -442,6 +670,56 @@ class JevReplyGatePlugin(MaiBotPlugin):
 
     config_model = JevReplyGateConfig
 
+    def get_webui_config_schema(
+        self,
+        *,
+        plugin_id: str = "",
+        plugin_name: str = "",
+        plugin_version: str = "",
+        plugin_description: str = "",
+        plugin_author: str = "",
+    ) -> Dict[str, Any]:
+        """返回按功能开关折叠对应设置区块的配置 Schema。"""
+
+        schema = super().get_webui_config_schema(
+            plugin_id=plugin_id,
+            plugin_name=plugin_name,
+            plugin_version=plugin_version,
+            plugin_description=plugin_description,
+            plugin_author=plugin_author,
+        )
+        features = self.get_plugin_config_data().get("features")
+        if not isinstance(features, dict):
+            return schema
+        reply_enabled = bool(features.get("reply_enabled", True))
+        duplicate_enabled = bool(features.get("duplicate_enabled", True))
+        unfinished_enabled = bool(features.get("unfinished_enabled", True))
+        sections = schema.get("sections")
+        if not isinstance(sections, dict):
+            return schema
+        section_states = {
+            "decision": not reply_enabled,
+            "duplicate": not duplicate_enabled,
+            "unfinished": not unfinished_enabled,
+        }
+        for section_name, collapsed in section_states.items():
+            section = sections.get(section_name)
+            if isinstance(section, dict):
+                section["collapsed"] = collapsed
+        prompts_section = sections.get("prompts")
+        if isinstance(prompts_section, dict):
+            prompts_section["collapsed"] = not (reply_enabled or duplicate_enabled)
+            fields = prompts_section.get("fields")
+            if isinstance(fields, dict):
+                for field_name in ("reply_criteria_true", "reply_criteria_false"):
+                    field = fields.get(field_name)
+                    if isinstance(field, dict):
+                        field["hidden"] = not reply_enabled
+                duplicate_field = fields.get("duplicate_criteria")
+                if isinstance(duplicate_field, dict):
+                    duplicate_field["hidden"] = not duplicate_enabled
+        return schema
+
     def __init__(self) -> None:
         super().__init__()
         self._scan_tasks: Dict[str, asyncio.Task[None]] = {}
@@ -477,7 +755,7 @@ class JevReplyGatePlugin(MaiBotPlugin):
         if self._llm_probe_task is not None:
             self._llm_probe_task.cancel()
             self._llm_probe_task = None
-        if not config.plugin.enabled or not config.unfinished.enabled:
+        if not config.plugin.enabled or not config.features.unfinished_enabled:
             self._cancel_all_scans()
         if config.plugin.enabled and config.service.mode == "llm":
             self._llm_probe_task = asyncio.create_task(
@@ -504,7 +782,7 @@ class JevReplyGatePlugin(MaiBotPlugin):
     ) -> Dict[str, Any]:
         del kwargs
         config = cast(JevReplyGateConfig, self.config)
-        if not config.plugin.enabled:
+        if not config.plugin.enabled or not config.features.reply_enabled:
             return {"action": "continue"}
         session = str(session_id or "").strip()
         target_message_id = str(reply_message_id or "").strip()
@@ -547,10 +825,9 @@ class JevReplyGatePlugin(MaiBotPlugin):
         return {
             "action": "abort",
             "custom_result": {
-                "reason": (
-                    f"主动保持安静（非故障）：最新私聊消息只是收尾或附和"
-                    f"（回复概率 {probability:.2f}，阈值 {threshold:.2f}），麦麦已经回应过用户的最新需求。"
-                    "请结束本轮，不要重复回复。"
+                "reason": config.prompts.reply_blocked_reason.format(
+                    probability=probability,
+                    threshold=threshold,
                 )
             },
         }
@@ -566,7 +843,7 @@ class JevReplyGatePlugin(MaiBotPlugin):
     )
     async def filter_repetitive_reply(self, **kwargs: Any) -> Dict[str, Any]:
         config = cast(JevReplyGateConfig, self.config)
-        if not config.plugin.enabled or not config.duplicate.enabled:
+        if not config.plugin.enabled or not config.features.duplicate_enabled:
             return {"action": "continue"}
         response = str(kwargs.get("response") or "").strip()
         session_id = str(kwargs.get("session_id") or "").strip()
@@ -618,10 +895,7 @@ class JevReplyGatePlugin(MaiBotPlugin):
             "modified_kwargs": {
                 **kwargs,
                 "retry": True,
-                "retry_reason": (
-                    f"重复度{probability:.0%}，属于重复低效。"
-                    "请换一个信息点或角度，避免复读最近说过的话，也不要只是把用户的话换个说法。"
-                ),
+                "retry_reason": config.prompts.duplicate_retry_reason.format(probability=probability),
             },
         }
 
@@ -643,7 +917,7 @@ class JevReplyGatePlugin(MaiBotPlugin):
         if not sent or not isinstance(message, dict):
             return {"action": "continue"}
         config = cast(JevReplyGateConfig, self.config)
-        if not config.plugin.enabled or not config.unfinished.enabled:
+        if not config.plugin.enabled or not config.features.unfinished_enabled:
             return {"action": "continue"}
         session_id = str(message.get("session_id") or "").strip()
         reply_to = str(message.get("reply_to") or "").strip()
@@ -858,12 +1132,17 @@ class JevReplyGatePlugin(MaiBotPlugin):
         data = await self._request_jev(
             messages,
             bot_account_id,
-            SYSTEM_PROMPT,
+            config.prompts.reply_system_prompt,
             {
                 "reply": {
                     "type": "noul",
-                    "instructions": QUESTION_INSTRUCTIONS.format(draft_reply=draft_text or "（没有额外说明。）"),
-                    "criteria": QUESTION_CRITERIA,
+                    "instructions": config.prompts.reply_question_template.format(
+                        draft_reply=draft_text or config.prompts.reply_empty_draft
+                    ),
+                    "criteria": {
+                        "true": config.prompts.reply_criteria_true,
+                        "false": config.prompts.reply_criteria_false,
+                    },
                 }
             },
             config,
@@ -879,12 +1158,15 @@ class JevReplyGatePlugin(MaiBotPlugin):
         data = await self._request_jev(
             messages,
             bot_account_id,
-            UNFINISHED_SYSTEM_PROMPT,
+            config.prompts.unfinished_system_prompt,
             {
                 "unfinished": {
                     "type": "noul",
-                    "instructions": UNFINISHED_QUESTION,
-                    "criteria": UNFINISHED_CRITERIA,
+                    "instructions": config.prompts.unfinished_question,
+                    "criteria": {
+                        "true": config.prompts.unfinished_criteria_true,
+                        "false": config.prompts.unfinished_criteria_false,
+                    },
                 }
             },
             config,
@@ -898,7 +1180,7 @@ class JevReplyGatePlugin(MaiBotPlugin):
         candidate: str,
         config: JevReplyGateConfig,
     ) -> float:
-        state_messages: List[Dict[str, str]] = [{"role": "system", "content": DUPLICATE_SYSTEM_PROMPT}]
+        state_messages: List[Dict[str, str]] = [{"role": "system", "content": config.prompts.duplicate_system_prompt}]
         if last_user_message:
             state_messages.append({"role": "user", "content": last_user_message})
         state_messages.append({"role": "assistant", "content": last_bot_message})
@@ -907,11 +1189,12 @@ class JevReplyGatePlugin(MaiBotPlugin):
             {
                 "duplicate": {
                     "type": "noul",
-                    "instructions": DUPLICATE_QUESTION_TEMPLATE.format(
+                    "instructions": config.prompts.duplicate_question_template.format(
                         last_bot=last_bot_message,
                         candidate=candidate,
+                        criteria=config.prompts.duplicate_criteria,
                     ),
-                    "criteria": DUPLICATE_CRITERIA,
+                    "criteria": DUPLICATE_OPTION_CRITERIA,
                 }
             },
             config,
@@ -940,7 +1223,7 @@ class JevReplyGatePlugin(MaiBotPlugin):
 
     def _schedule_scan(self, session_id: str, round_key: str) -> None:
         config = cast(JevReplyGateConfig, self.config)
-        if not config.plugin.enabled or not config.unfinished.enabled:
+        if not config.plugin.enabled or not config.features.unfinished_enabled:
             return
         triggered = self._handled_rounds.get(session_id)
         if triggered and round_key in triggered:
@@ -978,7 +1261,7 @@ class JevReplyGatePlugin(MaiBotPlugin):
         if triggered and round_key in triggered:
             return
         config = cast(JevReplyGateConfig, self.config)
-        if not config.plugin.enabled or not config.unfinished.enabled:
+        if not config.plugin.enabled or not config.features.unfinished_enabled:
             return
         messages = await self._fetch_recent_messages(session_id)
         if not messages:
@@ -1003,7 +1286,7 @@ class JevReplyGatePlugin(MaiBotPlugin):
                 config.unfinished.threshold,
             )
             return
-        intent = self._build_unfinished_intent(latest_message)
+        intent = self._build_unfinished_intent(latest_message, config)
         if self._scan_generations.get(session_id) != generation:
             return
         self._mark_round_handled(session_id, round_key)
@@ -1028,16 +1311,9 @@ class JevReplyGatePlugin(MaiBotPlugin):
         )
 
     @staticmethod
-    def _build_unfinished_intent(latest_message: Dict[str, Any]) -> str:
-        intent = (
-            "上一轮对话结束后，检查发现你还有未完成的事，尤其是你答应过用户但还没兑现的承诺。"
-            "请回看最近聊天，先完成这件事（需要查资料就调用工具或子代理），再自然地向用户补充结果；"
-            "不要开启无关话题。"
-        )
+    def _build_unfinished_intent(latest_message: Dict[str, Any], config: JevReplyGateConfig) -> str:
         last_text = _message_text(latest_message)
-        if last_text:
-            intent += f"\n你最后一条消息是：“{last_text[:200]}”"
-        return intent
+        return config.prompts.unfinished_intent_template.format(last_message=last_text[:200])
 
     def _mark_round_handled(self, session_id: str, round_key: str) -> None:
         rounds = self._handled_rounds.setdefault(session_id, deque(maxlen=50))

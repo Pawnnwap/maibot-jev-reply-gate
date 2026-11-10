@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "github.pawnnwap.jev-reply-gate",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "name": "JEV 接话判断",
   "description": "用 JEV 兼容决策服务或兼容 LLM 的 logprobs 判断私聊是否继续接话、过滤重复低效回复，并在每轮 bot 发话后检测未兑现的承诺或待办，必要时触发一次主动搭话。",
   "author": {
