@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Any, Deque, Dict, List, Literal, Optional, Tuple, cast
+from difflib import SequenceMatcher
+from typing import Any, Deque, Dict, List, Literal, NamedTuple, Optional, Tuple, cast
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -18,56 +19,48 @@ from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
 
 PLUGIN_ID = "github.pawnnwap.jev-reply-gate"
 HISTORY_LIMIT = 20
-MAX_DRAFT_CHARS = 1200
+MAX_RECENT_WINDOW = 100
+REPETITION_TEXT_CAP = 1500
 ANSWER_PREFIX = "答案："
 LLM_TOP_LOGPROBS = 5
 LABEL_TOKEN_PATTERN = re.compile(r"^\s*([A-Z]{1,2})[\.\):：,、]?\s*$")
-SYSTEM_PROMPT = """你正在和对方私聊。判断你现在还要不要继续回复最新一条用户消息。
-只依据聊天记录和下面的拟回复判断。
-
-1. 用户只回“嗯嗯”“好呀”“好的”“收到”“谢谢”“哈哈”“晚安”“先这样”“行吧”等短词，通常表示听到了、同意或准备结束。
-2. 如果你上一条已经回答、确认或处理了用户的最新需求，这些短回应就是收尾信号，不必再回“不客气”“好的呀”“哈哈”。
-3. 只有最新消息提出新问题、请求、新信息、新话题、纠正，明确表达情绪并希望被接住，或继续追问；或者拟回复会给出用户尚未得到的新内容、确认下一步行动时，才继续回复。
-4. 用户只是对你的提议说“好呀”时，如果拟回复要落实提议、确认细节或执行下一步，就回复；如果只是再客套一句，就不回复。
-5. 不确定时，优先不回复。"""
-QUESTION_INSTRUCTIONS = """结合最近的私聊记录和下面的拟回复，你现在应该继续回复最新这条用户消息吗？
-拟回复（仅供判断，不是用户的话）：
-{draft_reply}"""
+QUESTION_INSTRUCTIONS = "根据以上聊天记录和标注为【最新消息】的用户消息，助手现在应该继续回复吗？"
 QUESTION_CRITERIA = {
-    "true": "应该回复：最新消息提出了问题、请求、新信息、新话题、纠正，或拟回复包含用户尚未得到的新内容、需要落实的下一步。",
-    "false": "不必回复：最新消息只是嗯嗯、好呀、好的、收到、谢谢、哈哈、晚安等附和或收尾，你已经回应过用户的最新需求；或拟回复只是想再附和、客套一句。",
+    "true": "应该选Yes：最新消息提出了问题、请求、新信息、新话题、纠正，或明确表达情绪并希望被接住。",
+    "false": (
+        "命中以下任意情形之一直接选No：\n"
+        "1. 用户最新消息属于[好、嗯嗯、好呀、好哦、好的、收到、谢谢、哈哈、晚安]等礼貌性词汇\n"
+        "2. 用户明确说：先不打扰你了\n"
+        "3. 用户只是在附和助手，且助手已经回应过用户"
+    ),
 }
-UNFINISHED_SYSTEM_PROMPT = """检查上一轮私聊结束后，你是否还有没做完的事。只依据聊天记录判断。
-重点看你明确承诺、但还没兑现的事，如“我去搜一下”“稍后给你结论”“等我查查”“马上帮你弄”。
-用户提出明确请求（帮我看/帮我查/怎么解决），你只回“收到/好呀/稍后”而没有行动或结论，也算未完成。
-正常收尾、闲聊、道别，或已经给出结论/完成动作，不算未完成。
-用户后来取消请求、说“不用了”，或话题已明确转移，不算未完成。"""
-UNFINISHED_QUESTION = "上一轮对话结束后，你是否还有明确承诺或待办没有完成？只有确实需要继续行动时才选 Yes。"
+UNFINISHED_QUESTION = "上一轮对话结束后，助手是否还有明确承诺或待办没有完成？只有确实需要继续行动时才选 Yes。"
 UNFINISHED_CRITERIA = {
-    "true": "有未完成事项：你明确说要搜索、查证、整理、稍后给结论或帮用户做什么，但还没有结果或完成动作；或用户提出了明确请求而你尚未处理。",
-    "false": "没有未完成事项：你已经回答完用户的问题、给出结论或完成动作；只是普通收尾、道别、闲聊；用户已取消请求或转移话题；或没有需要继续处理的事。",
+    "true": "有未完成事项：助手明确说要搜索、查证、整理、稍后给结论或帮用户做什么，但还没有结果或完成动作；或用户提出了明确请求而助手尚未处理。",
+    "false": "没有未完成事项：助手已经回答完用户的问题、给出结论或完成动作；只是普通收尾、道别、闲聊；用户已取消请求或转移话题；或没有需要继续处理的事。",
 }
-DUPLICATE_SYSTEM_PROMPT = """比较你最近一条回复和候选回复。只依据给出的聊天上下文和两条文本判断。
-两条回复意思相同、候选只是换个说法，或候选几乎没有新增信息，就算重复。
-候选带来新信息、回应用户最新消息、推进话题，就不算重复。"""
-DUPLICATE_QUESTION_TEMPLATE = """你最近一条回复：
-「{last_bot}」
-
-候选回复：
-「{candidate}」
+DUPLICATE_QUESTION_TEMPLATE = """候选是否与上一条回复重复低效？
 
 判断标准：
-{criteria}
-
-候选回复是否重复低效（与最近一条回复意思重复、没有新增信息、没有推进对话）？"""
+{criteria}"""
 DUPLICATE_CRITERIA = (
-    "两条回复意思相同、候选只是换个说法，或候选几乎没有新增信息，就算重复。\n"
-    "候选带来新信息、回应用户最新消息、推进话题，就不算重复。"
+    "算重复：候选与上一条回复意思相近、只是换说法，或几乎没有新增信息。\n"
+    "不算重复：候选带来新信息、推进话题，或与上一条回复明显不同。"
 )
-DUPLICATE_OPTION_CRITERIA = {
-    "true": "符合判断标准，属于重复低效。",
-    "false": "不符合判断标准，不属于重复低效。",
+YES_NO_OPTION_CRITERIA = {
+    "true": "Yes",
+    "false": "No",
 }
+EASTER_EGG_USER_MESSAGE_COUNT = 3
+EASTER_EGG_THRESHOLD = 0.5
+EASTER_EGG_QUESTION = "以下3句话是否高度重复？"
+EASTER_EGG_CRITERIA = {
+    "true": "高度重复：三句话表达相同意思、只是换说法，或几乎没有新增信息。",
+    "false": "不算高度重复：三句话内容明显不同，或包含新信息。",
+}
+EASTER_EGG_INSTRUCTION = "对方高度疑似人机或复读机，可适当质问"
+DUPLICATE_RULE_CONTEXT_TEMPLATE = """规则比对：候选与此前的一条回复存在最长相同片段「{shared}」（占候选回复 {ratio:.0%}）。那条回复原文：
+「{record}」"""
 
 
 class PluginSectionConfig(PluginConfigBase):
@@ -78,7 +71,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用 JEV 接话判断")
-    config_version: str = Field(default="1.4.0", description="配置版本")
+    config_version: str = Field(default="1.5.0", description="配置版本")
 
 
 class FeatureConfig(PluginConfigBase):
@@ -169,25 +162,13 @@ class PromptConfig(PluginConfigBase):
     __ui_icon__ = "file-text"
     __ui_order__ = 5
 
-    reply_system_prompt: str = Field(
-        default=SYSTEM_PROMPT,
-        description="接话判断的系统提示词",
-        json_schema_extra={
-            "label": "接话判断系统提示词",
-            "hidden": True,
-            "hint": "作为 system 消息发送，定义你的角色定位和总体判断原则。",
-            "x-widget": "textarea",
-            "rows": 8,
-            "group": "接话判断",
-        },
-    )
     reply_question_template: str = Field(
         default=QUESTION_INSTRUCTIONS,
-        description="接话判断的问题模板，支持 {draft_reply} 占位符",
+        description="接话判断的问题模板，材料放在 state，判断标准会自动追加",
         json_schema_extra={
             "label": "接话判断问题模板",
             "hidden": True,
-            "hint": "支持 {draft_reply}，会被替换为 replyer 的拟回复内容。",
+            "hint": "问题只描述任务；聊天记录放在 state，最新用户消息会标注【最新消息】，reply_criteria_* 会作为判断标准追加。",
             "x-widget": "textarea",
             "rows": 4,
             "group": "接话判断",
@@ -215,53 +196,13 @@ class PromptConfig(PluginConfigBase):
             "group": "接话判断",
         },
     )
-    reply_empty_draft: str = Field(
-        default="（没有额外说明。）",
-        description="拟回复内容为空时填入问题模板的文本",
-        json_schema_extra={
-            "label": "拟回复为空的占位文案",
-            "hidden": True,
-            "hint": "reply_reason 和 reply_reference 都为空时，用它替换 {draft_reply}。",
-            "x-widget": "textarea",
-            "rows": 2,
-            "group": "接话判断",
-        },
-    )
-    reply_blocked_reason: str = Field(
-        default=(
-            "主动保持安静（非故障）：最新私聊消息只是收尾或附和"
-            "（回复概率 {probability:.2f}，阈值 {threshold:.2f}），你已经回应过用户的最新需求。"
-            "请结束本轮，不要重复回复。"
-        ),
-        description="接话判断拦下回复时写回 replyer 的原因说明",
-        json_schema_extra={
-            "label": "拦下回复的原因说明",
-            "hidden": True,
-            "hint": "支持 {probability} 和 {threshold} 占位符。",
-            "x-widget": "textarea",
-            "rows": 3,
-            "group": "接话判断",
-        },
-    )
-    duplicate_system_prompt: str = Field(
-        default=DUPLICATE_SYSTEM_PROMPT,
-        description="重复低效判断的系统提示词",
-        json_schema_extra={
-            "label": "重复判断系统提示词",
-            "hidden": True,
-            "hint": "作为 system 消息发送，定义重复低效的总体判断原则。",
-            "x-widget": "textarea",
-            "rows": 4,
-            "group": "重复判断",
-        },
-    )
     duplicate_question_template: str = Field(
         default=DUPLICATE_QUESTION_TEMPLATE,
-        description="重复低效判断的问题模板，支持 {last_bot}、{candidate} 和 {criteria} 占位符",
+        description="重复低效判断的问题模板，支持 {criteria} 占位符",
         json_schema_extra={
             "label": "重复判断问题模板",
             "hidden": True,
-            "hint": "支持 {last_bot}、{candidate} 和 {criteria} 占位符。",
+            "hint": "问题只描述任务；上一条回复、候选回复和规则比对放在 state，duplicate_criteria 作为判断标准。",
             "x-widget": "textarea",
             "rows": 6,
             "group": "重复判断",
@@ -278,10 +219,22 @@ class PromptConfig(PluginConfigBase):
             "group": "重复判断",
         },
     )
+    duplicate_rule_context_template: str = Field(
+        default=DUPLICATE_RULE_CONTEXT_TEMPLATE,
+        description="规则比对结果附加到 state 的模板，支持 {shared}、{ratio} 和 {record} 占位符",
+        json_schema_extra={
+            "label": "规则比对依据模板",
+            "hidden": True,
+            "hint": "支持 {shared}、{ratio} 和 {record} 占位符，仅在共享片段达到字数阈值时附加到 state。",
+            "x-widget": "textarea",
+            "rows": 4,
+            "group": "重复判断",
+        },
+    )
     duplicate_retry_reason: str = Field(
         default=(
             "重复度{probability:.0%}，属于重复低效。"
-            "请换一个信息点或角度，避免复读最近说过的话，也不要只是把用户的话换个说法。"
+            "请换一个信息点或角度，避免复读你自己之前的回复，也不要只是把用户的话换个说法。"
         ),
         description="请求 replyer 重生成时写回的原因说明",
         json_schema_extra={
@@ -293,25 +246,13 @@ class PromptConfig(PluginConfigBase):
             "group": "重复低效过滤",
         },
     )
-    unfinished_system_prompt: str = Field(
-        default=UNFINISHED_SYSTEM_PROMPT,
-        description="未完成事项检测的系统提示词",
-        json_schema_extra={
-            "label": "未完成事项系统提示词",
-            "hidden": True,
-            "hint": "作为 system 消息发送，定义什么算未完成事项。",
-            "x-widget": "textarea",
-            "rows": 5,
-            "group": "未完成事项",
-        },
-    )
     unfinished_question: str = Field(
         default=UNFINISHED_QUESTION,
-        description="未完成事项检测的问题",
+        description="未完成事项检测的问题，判断标准会自动追加",
         json_schema_extra={
             "label": "未完成事项问题",
             "hidden": True,
-            "hint": "交给决策服务的判断题，通常以“是否”结尾。",
+            "hint": "问题只描述任务；聊天记录放在 state，unfinished_criteria_* 会作为判断标准追加。",
             "x-widget": "textarea",
             "rows": 3,
             "group": "未完成事项",
@@ -323,7 +264,7 @@ class PromptConfig(PluginConfigBase):
         json_schema_extra={
             "label": "检测到未完成事项的情形",
             "hidden": True,
-            "hint": "作为 Yes 选项的说明。",
+            "hint": "作为判断标准的一部分。",
             "x-widget": "textarea",
             "rows": 3,
             "group": "未完成事项",
@@ -335,7 +276,7 @@ class PromptConfig(PluginConfigBase):
         json_schema_extra={
             "label": "没有未完成事项的情形",
             "hidden": True,
-            "hint": "作为 No 选项的说明。",
+            "hint": "作为判断标准的一部分。",
             "x-widget": "textarea",
             "rows": 3,
             "group": "未完成事项",
@@ -367,7 +308,7 @@ class DecisionConfig(PluginConfigBase):
     __ui_order__ = 6
 
     reply_threshold: float = Field(
-        default=0.3,
+        default=0.5,
         ge=0.0,
         le=1.0,
         description="决策服务给出的回复概率达到该值才继续回复；越高越容易保持安静",
@@ -403,7 +344,7 @@ class DuplicateConfig(PluginConfigBase):
     __ui_order__ = 8
 
     threshold: float = Field(
-        default=0.6,
+        default=0.4,
         ge=0.0,
         le=1.0,
         description="决策服务判定重复低效的概率达到该值才请求重生成",
@@ -413,6 +354,18 @@ class DuplicateConfig(PluginConfigBase):
         ge=0,
         le=3,
         description="最多请求重生成几次；受主程序 Hook 重试上限 3 约束，0 表示不重试",
+    )
+    recent_window: int = Field(
+        default=30,
+        ge=1,
+        le=MAX_RECENT_WINDOW,
+        description="规则比对回看最近多少条消息，且只比对其中 bot 自身的发言；超出默认历史读取条数时会按需多取",
+    )
+    rule_min_shared_chars: int = Field(
+        default=6,
+        ge=1,
+        le=200,
+        description="最长共享片段达到多少字，才把规则比对结果作为依据附给 JEV",
     )
 
 
@@ -459,6 +412,17 @@ def _is_bot_message(message: Dict[str, Any], bot_account_id: str = "") -> bool:
     return bool(user_id and account_id and user_id == account_id)
 
 
+def _tool_definition_name(definition: Any) -> str:
+    """读取 OpenAI function 或内部工具定义的名称。"""
+
+    if not isinstance(definition, dict):
+        return ""
+    function = definition.get("function")
+    if isinstance(function, dict):
+        return str(function.get("name") or "").strip()
+    return str(definition.get("name") or "").strip()
+
+
 def _message_text(message: Dict[str, Any]) -> str:
     if message.get("is_notify") or message.get("is_command"):
         return ""
@@ -474,29 +438,103 @@ def _message_text(message: Dict[str, Any]) -> str:
     return ""
 
 
-def _collect_draft_text(reply_reason: str, reply_tool_args: Any) -> str:
-    parts: List[str] = []
-    for raw_value in (
-        reply_reason,
-        reply_tool_args.get("reply_reference") if isinstance(reply_tool_args, dict) else "",
-    ):
-        if not isinstance(raw_value, str):
+class RepetitionMatch(NamedTuple):
+    """候选回复与历史记录中共享重复最多一条的规则比对结果。"""
+
+    record_text: str
+    shared_substring: str
+    ratio: float
+
+
+def _normalize_repetition_text(text: str) -> str:
+    """规整文本供重复子串比较：去掉所有空白并忽略大小写。"""
+    return "".join(text.split()).casefold()
+
+
+def _longest_common_substring(a: str, b: str) -> str:
+    """返回两条文本的最长公共子串；没有公共子串时返回空串。"""
+    if not a or not b:
+        return ""
+    matcher = SequenceMatcher(None, a, b, autojunk=False)
+    match = matcher.find_longest_match()
+    return a[match.a : match.a + match.size]
+
+
+def _find_rule_repetition(
+    candidate: str,
+    messages: List[Dict[str, Any]],
+    bot_account_id: str,
+    window: int,
+) -> RepetitionMatch:
+    """用最长公共子串在最近 window 条 bot 自身发言中找出与候选回复共享重复最多的一条。
+
+    只回看 bot 自己的历史发言，避免把用户或其他人的话当成重复依据。
+    重复度按共享子串占候选回复的比例计算；同一重复度时保留更近的记录。
+    """
+
+    candidate_text = _normalize_repetition_text(candidate)[:REPETITION_TEXT_CAP]
+    if not candidate_text or window <= 0:
+        return RepetitionMatch("", "", 0.0)
+    bot_messages = [message for message in messages if _is_bot_message(message, bot_account_id)]
+    best = RepetitionMatch("", "", 0.0)
+    for message in reversed(bot_messages[-window:]):
+        raw_record_text = _message_text(message)
+        if not raw_record_text:
             continue
-        value = raw_value.strip()
-        if value and value not in parts:
-            parts.append(value)
-    text = "\n".join(parts)
-    return text[:MAX_DRAFT_CHARS]
+        record_text = _normalize_repetition_text(raw_record_text)[:REPETITION_TEXT_CAP]
+        if len(record_text) <= len(best.shared_substring):
+            continue
+        shared = _longest_common_substring(candidate_text, record_text)
+        if len(shared) > len(best.shared_substring):
+            best = RepetitionMatch(raw_record_text, shared, len(shared) / len(candidate_text))
+            if len(shared) >= len(candidate_text):
+                break
+    return best
 
 
-def _build_jev_state(messages: List[Dict[str, Any]], bot_account_id: str, system_prompt: str) -> List[Dict[str, str]]:
-    state: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
-    for message in messages[-HISTORY_LIMIT:]:
+def _build_jev_history(
+    messages: List[Dict[str, Any]],
+    bot_account_id: str,
+    *,
+    mark_latest_user: bool = False,
+) -> List[Dict[str, str]]:
+    """把最近私聊记录整理成 用户:/助手: 纯文本，合并相邻同角色消息，并可标注最新用户消息。"""
+
+    window = messages[-HISTORY_LIMIT:]
+    latest_user_index: Optional[int] = None
+    if mark_latest_user:
+        for index in range(len(window) - 1, -1, -1):
+            message = window[index]
+            if _message_text(message) and not _is_bot_message(message, bot_account_id):
+                latest_user_index = index
+                break
+    lines: List[str] = []
+    current_label = ""
+    current_text = ""
+    current_mark = False
+    for index, message in enumerate(window):
         text = _message_text(message)
         if not text:
             continue
-        state.append({"role": "assistant" if _is_bot_message(message, bot_account_id) else "user", "content": text})
-    return state
+        text = " ".join(text.splitlines())
+        label = "助手" if _is_bot_message(message, bot_account_id) else "用户"
+        is_latest = index == latest_user_index
+        if label == current_label:
+            current_text = f"{current_text} {text}" if current_text else text
+            current_mark = current_mark or is_latest
+            continue
+        if current_label:
+            prefix = "【最新消息】" if current_mark else ""
+            lines.append(f"{prefix}{current_label}: {current_text}")
+        current_label = label
+        current_text = text
+        current_mark = is_latest
+    if current_label:
+        prefix = "【最新消息】" if current_mark else ""
+        lines.append(f"{prefix}{current_label}: {current_text}")
+    if not lines:
+        return []
+    return [{"role": "user", "content": "\n".join(lines)}]
 
 
 def _systemone_url(api_url: str) -> str:
@@ -764,20 +802,19 @@ class JevReplyGatePlugin(MaiBotPlugin):
             )
 
     @HookHandler(
-        "maisaka.replyer.before_request",
-        name="jev_reply_gate",
-        description="用 JEV 决策服务判断是否继续回复最新私聊消息",
+        "maisaka.planner.before_request",
+        name="jev_reply_gate_planner",
+        description="用 JEV 判断是否继续回复最新私聊消息；不回复时从 planner 工具列表中移除 reply",
         mode=HookMode.BLOCKING,
         order=HookOrder.EARLY,
         timeout_ms=6000,
         error_policy=ErrorPolicy.SKIP,
     )
-    async def gate_reply(
+    async def gate_reply_planner(
         self,
         session_id: str = "",
-        reply_message_id: str = "",
-        reply_reason: str = "",
-        reply_tool_args: Any = None,
+        items: Any = None,
+        tool_definitions: Any = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         del kwargs
@@ -785,52 +822,133 @@ class JevReplyGatePlugin(MaiBotPlugin):
         if not config.plugin.enabled or not config.features.reply_enabled:
             return {"action": "continue"}
         session = str(session_id or "").strip()
-        target_message_id = str(reply_message_id or "").strip()
-        if not session or not target_message_id:
+        if not session or not isinstance(tool_definitions, list):
+            return {"action": "continue"}
+        if not any(_tool_definition_name(definition) == "reply" for definition in tool_definitions):
+            return {"action": "continue"}
+        if isinstance(items, list) and "<plugin_proactive_task" in json.dumps(items, ensure_ascii=False):
             return {"action": "continue"}
         try:
             messages = await self._fetch_recent_messages(session)
-            latest_message = messages[-1] if messages else None
-            if latest_message is None:
+            if not messages:
                 return {"action": "continue"}
+            latest_message = messages[-1]
             bot_account_id = _resolve_bot_account_id(messages)
             if not _is_private_message(latest_message) or _is_bot_message(latest_message, bot_account_id):
                 return {"action": "continue"}
             if latest_message.get("is_notify") or latest_message.get("is_command"):
                 return {"action": "continue"}
-            if str(latest_message.get("message_id") or "").strip() != target_message_id:
-                return {"action": "continue"}
             if not _message_text(latest_message):
                 return {"action": "continue"}
-            draft_text = _collect_draft_text(reply_reason, reply_tool_args)
-            probability = await self._ask_jev(messages, bot_account_id, draft_text, config)
+            probability = await self._ask_jev(messages, bot_account_id, config)
         except Exception as exc:
             self.ctx.logger.warning("JEV 接话判断失败，保留正常回复: %s", exc)
             return {"action": "continue"}
         threshold = config.decision.reply_threshold
         if probability >= threshold:
             self.ctx.logger.debug(
-                "JEV 允许回复: session=%s probability=%.3f threshold=%.2f",
+                "JEV 允许回复(planner): session=%s probability=%.3f threshold=%.2f",
                 session,
                 probability,
                 threshold,
             )
             return {"action": "continue"}
+        filtered_tools = [
+            definition
+            for definition in tool_definitions
+            if _tool_definition_name(definition) != "reply"
+        ]
+        if len(filtered_tools) == len(tool_definitions):
+            return {"action": "continue"}
         self.ctx.logger.info(
-            "JEV 拦下收尾回复: session=%s probability=%.3f threshold=%.2f",
+            "JEV 在 planner 拦下回复: session=%s probability=%.3f threshold=%.2f",
             session,
             probability,
             threshold,
         )
-        return {
-            "action": "abort",
-            "custom_result": {
-                "reason": config.prompts.reply_blocked_reason.format(
-                    probability=probability,
-                    threshold=threshold,
-                )
-            },
-        }
+        return {"action": "continue", "tool_definitions": filtered_tools}
+
+    @HookHandler(
+        "maisaka.replyer.before_request",
+        name="jev_easter_egg",
+        description="最近3条用户消息高度重复时，向 replier 追加一句质问提示",
+        mode=HookMode.BLOCKING,
+        order=HookOrder.LATE,
+        timeout_ms=6000,
+        error_policy=ErrorPolicy.SKIP,
+    )
+    async def inject_repetition_easter_egg(
+        self,
+        session_id: str = "",
+        extra_prompt: str = "",
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        del kwargs
+        config = cast(JevReplyGateConfig, self.config)
+        if not config.plugin.enabled:
+            return {"action": "continue"}
+        session = str(session_id or "").strip()
+        if not session:
+            return {"action": "continue"}
+        try:
+            messages = await self._fetch_recent_messages(session, MAX_RECENT_WINDOW)
+            if not messages:
+                return {"action": "continue"}
+            if not _is_private_message(messages[-1]):
+                return {"action": "continue"}
+            bot_account_id = _resolve_bot_account_id(messages)
+            user_texts: List[str] = []
+            for message in reversed(messages):
+                if _is_bot_message(message, bot_account_id):
+                    continue
+                text = _message_text(message)
+                if not text:
+                    continue
+                user_texts.append(" ".join(text.splitlines()))
+                if len(user_texts) >= EASTER_EGG_USER_MESSAGE_COUNT:
+                    break
+            if len(user_texts) < EASTER_EGG_USER_MESSAGE_COUNT:
+                return {"action": "continue"}
+            user_texts.reverse()
+            state_messages = [{
+                "role": "user",
+                "content": "\n".join(
+                    f"用户消息{index}：{text}"
+                    for index, text in enumerate(user_texts, start=1)
+                ),
+            }]
+            instructions = (
+                f"{EASTER_EGG_QUESTION}\n\n"
+                f"判断标准：\n{EASTER_EGG_CRITERIA['true']}\n{EASTER_EGG_CRITERIA['false']}"
+            )
+            data = await self._request_decisions(
+                state_messages,
+                {
+                    "easter_egg": {
+                        "type": "noul",
+                        "instructions": instructions,
+                        "criteria": YES_NO_OPTION_CRITERIA,
+                    }
+                },
+                config,
+            )
+            probability = _extract_noul_probability(data, "easter_egg")
+            if probability < EASTER_EGG_THRESHOLD:
+                return {"action": "continue"}
+            merged_prompt = str(extra_prompt or "").strip()
+            merged_prompt = (
+                f"{merged_prompt}\n{EASTER_EGG_INSTRUCTION}"
+                if merged_prompt else EASTER_EGG_INSTRUCTION
+            )
+            self.ctx.logger.info(
+                "JEV 彩蛋: session=%s 最近3条用户消息高度重复 probability=%.3f，已插入 replier 提示",
+                session,
+                probability,
+            )
+            return {"action": "continue", "extra_prompt": merged_prompt}
+        except Exception as exc:
+            self.ctx.logger.warning("JEV 彩蛋判断失败，跳过插入: %s", exc)
+            return {"action": "continue"}
 
     @HookHandler(
         "maisaka.replyer.after_response",
@@ -860,16 +978,31 @@ class JevReplyGatePlugin(MaiBotPlugin):
             )
             return {"action": "continue"}
         try:
-            messages = await self._fetch_recent_messages(session_id)
+            messages = await self._fetch_recent_messages(
+                session_id, max(HISTORY_LIMIT, config.duplicate.recent_window)
+            )
             bot_account_id = _resolve_bot_account_id(messages)
-            last_bot_message = self._find_last_bot_text(messages, bot_account_id)
+            last_bot_message = self._find_last_bot_message(messages, bot_account_id)
             if not last_bot_message:
                 return {"action": "continue"}
-            last_user_message = self._find_last_user_text(messages, bot_account_id)
+            rule_match = await asyncio.to_thread(
+                _find_rule_repetition,
+                response,
+                messages,
+                bot_account_id,
+                config.duplicate.recent_window,
+            )
+            if rule_match.shared_substring:
+                self.ctx.logger.debug(
+                    "JEV 规则比对: session=%s 最长共享片段%d字 重复度%.0f%%",
+                    session_id,
+                    len(rule_match.shared_substring),
+                    rule_match.ratio * 100,
+                )
             probability = await self._ask_jev_duplicate(
                 last_bot_message,
-                last_user_message,
                 response,
+                rule_match,
                 config,
             )
         except Exception as exc:
@@ -957,13 +1090,13 @@ class JevReplyGatePlugin(MaiBotPlugin):
         self._cancel_all_scans()
         return {"action": "continue"}
 
-    async def _fetch_recent_messages(self, session_id: str) -> List[Dict[str, Any]]:
+    async def _fetch_recent_messages(self, session_id: str, limit: int = HISTORY_LIMIT) -> List[Dict[str, Any]]:
         raw_messages = await self.ctx.call_capability(
             "message.get_by_time_in_chat",
             chat_id=session_id,
             start_time=0.0,
             end_time=time.time(),
-            limit=HISTORY_LIMIT,
+            limit=limit,
             limit_mode="latest",
         )
         if isinstance(raw_messages, dict):
@@ -980,10 +1113,9 @@ class JevReplyGatePlugin(MaiBotPlugin):
         questions: Dict[str, Any],
         config: JevReplyGateConfig,
     ) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {
-            "state": {"messages": state_messages},
-            "questions": questions,
-        }
+        payload: Dict[str, Any] = {"questions": questions}
+        if state_messages:
+            payload["state"] = {"messages": state_messages}
         model = config.jev.model.strip()
         if model:
             payload["model"] = model
@@ -1113,36 +1245,30 @@ class JevReplyGatePlugin(MaiBotPlugin):
 
     async def _request_jev(
         self,
-        messages: List[Dict[str, Any]],
-        bot_account_id: str,
-        system_prompt: str,
+        state_messages: List[Dict[str, str]],
         questions: Dict[str, Any],
         config: JevReplyGateConfig,
     ) -> Dict[str, Any]:
-        state_messages = _build_jev_state(messages, bot_account_id, system_prompt)
         return await self._request_decisions(state_messages, questions, config)
 
     async def _ask_jev(
         self,
         messages: List[Dict[str, Any]],
         bot_account_id: str,
-        draft_text: str,
         config: JevReplyGateConfig,
     ) -> float:
+        state_messages = _build_jev_history(messages, bot_account_id, mark_latest_user=True)
+        instructions = (
+            f"{config.prompts.reply_question_template.strip()}\n\n"
+            f"判断标准：\n{config.prompts.reply_criteria_true.strip()}\n{config.prompts.reply_criteria_false.strip()}"
+        )
         data = await self._request_jev(
-            messages,
-            bot_account_id,
-            config.prompts.reply_system_prompt,
+            state_messages,
             {
                 "reply": {
                     "type": "noul",
-                    "instructions": config.prompts.reply_question_template.format(
-                        draft_reply=draft_text or config.prompts.reply_empty_draft
-                    ),
-                    "criteria": {
-                        "true": config.prompts.reply_criteria_true,
-                        "false": config.prompts.reply_criteria_false,
-                    },
+                    "instructions": instructions,
+                    "criteria": YES_NO_OPTION_CRITERIA,
                 }
             },
             config,
@@ -1155,18 +1281,18 @@ class JevReplyGatePlugin(MaiBotPlugin):
         bot_account_id: str,
         config: JevReplyGateConfig,
     ) -> float:
+        state_messages = _build_jev_history(messages, bot_account_id)
+        instructions = (
+            f"{config.prompts.unfinished_question.strip()}\n\n"
+            f"判断标准：\n{config.prompts.unfinished_criteria_true.strip()}\n{config.prompts.unfinished_criteria_false.strip()}"
+        )
         data = await self._request_jev(
-            messages,
-            bot_account_id,
-            config.prompts.unfinished_system_prompt,
+            state_messages,
             {
                 "unfinished": {
                     "type": "noul",
-                    "instructions": config.prompts.unfinished_question,
-                    "criteria": {
-                        "true": config.prompts.unfinished_criteria_true,
-                        "false": config.prompts.unfinished_criteria_false,
-                    },
+                    "instructions": instructions,
+                    "criteria": YES_NO_OPTION_CRITERIA,
                 }
             },
             config,
@@ -1176,25 +1302,31 @@ class JevReplyGatePlugin(MaiBotPlugin):
     async def _ask_jev_duplicate(
         self,
         last_bot_message: str,
-        last_user_message: str,
         candidate: str,
+        rule_match: RepetitionMatch,
         config: JevReplyGateConfig,
     ) -> float:
-        state_messages: List[Dict[str, str]] = [{"role": "system", "content": config.prompts.duplicate_system_prompt}]
-        if last_user_message:
-            state_messages.append({"role": "user", "content": last_user_message})
-        state_messages.append({"role": "assistant", "content": last_bot_message})
+        state_text = f"上一条回复：\n「{last_bot_message}」\n\n候选回复：\n「{candidate}」"
+        if len(rule_match.shared_substring) >= config.duplicate.rule_min_shared_chars:
+            state_text = (
+                state_text
+                + "\n\n"
+                + config.prompts.duplicate_rule_context_template.format(
+                    shared=rule_match.shared_substring,
+                    ratio=rule_match.ratio,
+                    record=rule_match.record_text,
+                )
+            )
+        instructions = config.prompts.duplicate_question_template.format(
+            criteria=config.prompts.duplicate_criteria,
+        )
         data = await self._request_decisions(
-            state_messages,
+            [{"role": "user", "content": state_text}],
             {
                 "duplicate": {
                     "type": "noul",
-                    "instructions": config.prompts.duplicate_question_template.format(
-                        last_bot=last_bot_message,
-                        candidate=candidate,
-                        criteria=config.prompts.duplicate_criteria,
-                    ),
-                    "criteria": DUPLICATE_OPTION_CRITERIA,
+                    "instructions": instructions,
+                    "criteria": YES_NO_OPTION_CRITERIA,
                 }
             },
             config,
@@ -1202,19 +1334,11 @@ class JevReplyGatePlugin(MaiBotPlugin):
         return _extract_noul_probability(data, "duplicate")
 
     @staticmethod
-    def _find_last_bot_text(messages: List[Dict[str, Any]], bot_account_id: str) -> str:
+    def _find_last_bot_message(messages: List[Dict[str, Any]], bot_account_id: str) -> str:
+        """返回 bot 最近一条非空发言；没有时返回空串。"""
+
         for message in reversed(messages):
             if not _is_bot_message(message, bot_account_id):
-                continue
-            text = _message_text(message)
-            if text:
-                return text
-        return ""
-
-    @staticmethod
-    def _find_last_user_text(messages: List[Dict[str, Any]], bot_account_id: str) -> str:
-        for message in reversed(messages):
-            if _is_bot_message(message, bot_account_id):
                 continue
             text = _message_text(message)
             if text:
